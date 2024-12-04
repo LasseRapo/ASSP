@@ -1,37 +1,91 @@
-/*Fixed Point Implementation of N*M in M*K matrix Multiplication (2 point)
-This program is just a nested loop. The only difference is that it should be implemented
-as a fixed point program, i.e. it’s inputs and outputs are all FLOAT32 but the middle
-computations all will be fixed point and half floating point and the final results again
-must be FLOAT32 either printed in screen or stored in a float32 array. Please use the
-following function format so I can use it in my test code to check the results:
-int Matrxi_Mul( float * A, float * B, float *Result, int rows_of_A, int columns_of_A ,int rows_of_B, int
-columns_of_B, bool Fix_Or_Float16)
-*/
-// A is first matrix, B is the second, Result is the resultant matrix which obviously would be of size
-//rows_of_A in
-//Fix_Or_Float16 determines if the middle computations are fixed or float 16
-// return 1 ; //if multiplication can be done
-// return 0 ; //if multiplication cannot be done
-
-
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
+#include <math.h>
+#include <string.h>
+
+#define FP 128 // 2^7
 
 
-float dot(float* A, float* B, int length)
-{   
+// NOTE: Copied from half_to_float.c from Lab1
+// Static function to convert float bits to float16 representation
+static uint16_t float_to_halfI(uint32_t i) {
+    int s =  (i >> 16) & 0x00008000;                   // sign
+    int e = ((i >> 23) & 0x000000ff) - (127 - 15);     // exponent
+    int f =   i        & 0x007fffff;                   // fraction
 
-    float sum = 0;
-
-    for(int i = 0; i < length; i++)
-    {
-        sum += A[i] * B[i];
+    // Handle NaNs and Infs
+    if (e <= 0) {
+        if (e < -10) {
+            if (s)  // Handle -0.0
+                return 0x8000;
+            else
+                return 0;
+        }
+        f = (f | 0x00800000) >> (1 - e);
+        return s | (f >> 13);
+    } else if (e == 0xff - (127 - 15)) {
+        if (f == 0)  // Inf
+            return s | 0x7c00;
+        else {  // NaN
+            f >>= 13;
+            return s | 0x7c00 | f | (f == 0);
+        }
+    } else {
+        if (e > 30)  // Overflow
+            return s | 0x7c00;
+        return s | (e << 10) | (f >> 13);
     }
-
-    return sum;
 }
 
+// Static function to convert float16 bits to float representation
+static uint32_t half_to_floatI(uint16_t y) {
+    int s = (y >> 15) & 0x00000001;                   // sign
+    int e = (y >> 10) & 0x0000001f;                   // exponent
+    int f =  y        & 0x000003ff;                   // fraction
+
+    // Handle special cases
+    if (e == 0) {
+        if (f == 0)  // Plus or minus zero
+            return s << 31;
+        else {  // Denormalized number -- renormalize it
+            while (!(f & 0x00000400)) {
+                f <<= 1;
+                e -=  1;
+            }
+            e += 1;
+            f &= ~0x00000400;
+        }
+    } else if (e == 31) {
+        if (f == 0)  // Inf
+            return (s << 31) | 0x7f800000;
+        else  // NaN
+            return (s << 31) | 0x7f800000 | (f << 13);
+    }
+
+    e = e + (127 - 15);
+    f = f << 13;
+
+    return ((s << 31) | (e << 23) | f);
+}
+
+// Function to convert float to float16 representation
+uint16_t float_to_float16(float value) {
+    union { float f; uint32_t i; } v;
+    v.f = value;
+    return float_to_halfI(v.i);
+}
+
+// Function to convert float16 to float representation
+float float16_to_float(uint16_t value) {
+    union { float f; uint32_t i; } v;
+    v.i = half_to_floatI(value);
+    return v.f;
+}
+
+//  Fix_Or_Float16 = false -> fixed point
+//  Fix_Or_Float16 = true -> float16
 int Matrix_Mul( float * A, 
                 float * B, 
                 float * Result, 
@@ -42,24 +96,11 @@ int Matrix_Mul( float * A,
                 bool Fix_Or_Float16 )
 
 {
+    
     if( columns_of_A != rows_of_B )
     {
         return 0;
     }
-
-    // reserve dynamically memory for result 
-
-    printf("Allocating memory with sizeof %d\n", rows_of_A * columns_of_B );
-    Result = malloc( rows_of_A * columns_of_B * sizeof(float) );
-    
-    if( Result == NULL ) 
-    {
-        printf("ERROR: Failed to allocate memory for result matrix\n");
-        exit(1);
-    }
-
-
-    // TODO: FIXED point implementation and float16 implementation
     
     int total_iterations = 0;
 
@@ -69,82 +110,34 @@ int Matrix_Mul( float * A,
         {
             // i is row, j is column
 
-            Result[total_iterations] = 0.0f;
-
             for (int k = 0; k < columns_of_A; k++)
             {
 
-                // loop used to calculate the dot product
+                if (Fix_Or_Float16 == false)
+                {
+                    // loop used to calculate the dot product
+                    int A_fix = A[i * rows_of_A + k] * FP;
+                    int B_fix = B[k * columns_of_B + j] * FP;
 
-                Result[total_iterations] += A[i* rows_of_A + k] * B[k * columns_of_B + j];
+                    int product = A_fix * B_fix;
 
-                printf("iter | j-val | index B | A val   | B val\n");
-                printf("%d     %d        %d        %f  %f\n\n", total_iterations, j, k*columns_of_B + j, A[i * rows_of_A + k], B[k * (columns_of_B) + j] );
+                    Result[total_iterations] += (float)product / (FP * FP); // scale back to floating point presentation, could also be done using bit shifting but fractional parts would require additional configuration
+
+                } else
+                {
+                    // Float16 implementation
+                    uint16_t A_f16 = float_to_float16(A[i * columns_of_A + k]);
+                    uint16_t B_f16 = float_to_float16(B[k * columns_of_B + j]);
+                    float A_f32 = float16_to_float(A_f16);
+                    float B_f32 = float16_to_float(B_f16);
+                    float product = A_f32 * B_f32;
+                    Result[total_iterations] += product;
+                }
             }
-            
             //printf("%d %f\n", total_iterations, Result[total_iterations]);
             total_iterations++;
         }
 
-
-            // [[1, 2], [3, 4]] * [[1, 0], [0, 1]] = [[1, 2], [3, 4]] = [[1*1 + 0*3, 2*1 + 4*0], [1*0 + 3*1, 2*0 + 4*1]]
-            
-            // A[0] * B[0] + A[2] * B[1] 
-            // A[1] * B[0] + A[3] * B[1]
-            // A[0] * B[2] + A[2] * B[3]
-            // A[1] * B[2] + A[3] * B[3]
-
-            // NxM matriisi 
-
-            /* 
-            A = [[1, 2, 3],
-                 [4, 5, 6],
-                 [7, 8, 9]]
-
-            B = [[1, 0, 0],
-                 [0, 1, 0],
-                 [0, 0, 1]] 
-
-            // A[0] * B[0] + A[3] * B[1] + A[6] * B[2]
-            // A[1] * B[0] + A[4] * B[1] + A[7] * B[2]
-            // A[2] * B[0] + A[5] * B[1] + A[8] * B[2]
-            // A[0] * B[3] + A[3] * B[4] + A[6] * B[5]
-            // A[1] * B[3] + A[4] * B[4] + A[7] * B[5]
-            // A[2] * B[3] + A[5] * B[4] + A[8] * B[5]
-            // A[0] * B[6] + A[3] * B[7] + A[6] * B[8]
-            // A[1] * B[6] + A[4] * B[7] + A[7] * B[8]
-            // A[2] * B[6] + A[5] * B[7] + A[8] * B[8]
-
-            // 3x3 * 2x3 => 2x3 
-            
-            
-            // FIRST ROW
-            // A[0] * B[0] + A[3] * B[1] + A[6] * B[2]
-            // A[1] * B[0] + A[4] * B[1] + A[7] * B[2]
-            // A[2] * B[0] + A[5] * B[1] + A[8] * B[2]
-
-            // SECOND ROW
-            // A[0] * B[3] + A[3] * B[4] + A[6] * B[5]
-            // A[1] * B[3] + A[4] * B[4] + A[7] * B[5]
-            // A[2] * B[3] + A[5] * B[4] + A[8] * B[5]
-
-            A[j], B[...], A[...], B[+1]
-
-            A[0] = 1 A[1] = 2 A[2] = 3 ...
-            B[0] = 1 B[1] = 0 B[2] = 0, B[3] = 0
-
-            */
-
-            
-
-
-            // [[1, 2, 3], 
-            //  [4, 5, 6]]
-    }
-
-    for( int i = 0; i < rows_of_A * columns_of_B; i++ )
-    {
-        printf("%f\n", Result[i]);
     }
 
     return 1;
@@ -157,14 +150,17 @@ int main( void )
     float A3[8], B3[8]; // A is 4x2 and B is 2x4 matrices
     float A4[8], B4[8]; // A is 4x2 and B is 4x2 matrices (this should return 0)
 
-    float A5[9] = {1, 2, 3, 4, 5, 6, 7, 8, 9}; 
-    float B5[6] = {1, 0, 0, 1, 0, 0}; 
+    float A5[9] = {1.122222222, 2.23333333333333, 3.4555555555555555555, 4.56, 5.78, 6.19, 7.23, 8.54, 9.12}; 
+    float B5[9] = { 1, 0, 0,
+                    0, 1, 0, 
+                    0, 0, 1 }; 
 
-    float* Result1 = NULL;
-    float* Result2 = NULL;
-    float* Result3 = NULL;
-    float* Result4 = NULL;
-    float* Result5 = NULL;
+    float Result1[16] = {0};
+    float Result2[4] = {0};
+    float Result3[8] = {0};
+    float Result4[8] = {0};
+    float Result5[9] = {0};
+
 
     int status[5];
 
@@ -172,12 +168,24 @@ int main( void )
     //status[1] = Matrix_Mul(A2, B1, Result2, 2, 2, 2, 2, false);
     //status[2] = Matrix_Mul(A3, B1, Result3, 4, 2, 2, 4, false);
     //status[3] = Matrix_Mul(A4, B4, Result4, 4, 2, 4, 2, false);
-    status[4] = Matrix_Mul(A5, B5, Result5, 3, 3, 3, 2, false);
+    status[4] = Matrix_Mul(A5, B5, Result5, 3, 3, 3, 3, true);
 
 
     // Check Result5
 
-    printf("Printing statuses\n");
+    printf("Print result of Result5 matrix\n");
+    int total_iter = 0;
+    for(int i = 0; i < 3; i++)
+    {
+        for( int j = 0; j < 3; j++)
+        {   
+            printf("%f ", Result5[total_iter]);
+            total_iter++;       
+        }
+        printf("\n");
+    }
+
+    printf("\nPrinting statuses\n");
 
     for( int i = 0; i < 5; i++ ) 
     {
@@ -190,11 +198,6 @@ int main( void )
         }
     } 
 
-
-    free(Result1);
-    free(Result2);
-    free(Result3);
-    free(Result4);
     return 0;
 
     // Matrix multiplication fails when columns of A do not equal to Rows of B i.e assuming A is NxM and B is KxP matrices

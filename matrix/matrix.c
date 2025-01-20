@@ -128,9 +128,9 @@ int Matrix_Mul( float * A,
                     // Float16 implementation
                     uint16_t A_f16 = float_to_float16(A[i * columns_of_A + k]);
                     uint16_t B_f16 = float_to_float16(B[k * columns_of_B + j]);
-                    float A_f32 = float16_to_float(A_f16);
-                    float B_f32 = float16_to_float(B_f16);
-                    float product = A_f32 * B_f32;
+
+                    uint16_t product_f16 = A_f16 * B_f16;
+                    float product = float16_to_float(product_f16);
                     Result[total_iterations] += product;
                 }
             }
